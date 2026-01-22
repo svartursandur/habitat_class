@@ -26,7 +26,7 @@ from utils import load_training_data
 @dataclass
 class Config:
     task: str = "multitask"  # vistgerd | vistlendi | multitask
-    backbone: str = "resnet18"  # resnet18 | resnet34 | efficientnet_b0
+    backbone: str = "resnet18"  # resnet18 | resnet34 | resnet50 | resnet101 | efficientnet_b0
     aspect_mode: str = "map"  # map | scalar
     device: str = "auto"  # auto | cpu | cuda
     batch_size: int = 64
@@ -39,8 +39,11 @@ class Config:
     num_workers: int = 4
     crop_pad: int = 2
     use_class_weights: bool = True
+    use_balanced_sampler: bool = False
     use_focal: bool = False
     focal_gamma: float = 2.0
+    mixup_alpha: float = 0.0
+    label_smoothing: float = 0.0
     scheduler: str = "plateau"  # plateau | cosine | none
     early_stop_patience: int = 5
     early_stop_min_delta: float = 0.001
@@ -255,6 +258,20 @@ def build_backbone(name: str, in_channels: int) -> Tuple[nn.Module, int]:
         feat_dim = model.fc.in_features
         model.fc = nn.Identity()
         return model, feat_dim
+    if name == "resnet50":
+        weights = models.ResNet50_Weights.DEFAULT
+        model = safe_load(models.resnet50, weights)
+        adapt_first_conv(model, in_channels)
+        feat_dim = model.fc.in_features
+        model.fc = nn.Identity()
+        return model, feat_dim
+    if name == "resnet101":
+        weights = models.ResNet101_Weights.DEFAULT
+        model = safe_load(models.resnet101, weights)
+        adapt_first_conv(model, in_channels)
+        feat_dim = model.fc.in_features
+        model.fc = nn.Identity()
+        return model, feat_dim
     if name == "efficientnet_b0":
         weights = models.EfficientNet_B0_Weights.DEFAULT
         model = safe_load(models.efficientnet_b0, weights)
@@ -327,8 +344,12 @@ def loss_for_task(
         loss_fine = focal_loss(logits_fine, y_fine, w_fine, cfg.focal_gamma)
         loss_coarse = focal_loss(logits_coarse, y_coarse, w_coarse, cfg.focal_gamma)
     else:
-        loss_fine = F.cross_entropy(logits_fine, y_fine, weight=w_fine)
-        loss_coarse = F.cross_entropy(logits_coarse, y_coarse, weight=w_coarse)
+        loss_fine = F.cross_entropy(
+            logits_fine, y_fine, weight=w_fine, label_smoothing=cfg.label_smoothing
+        )
+        loss_coarse = F.cross_entropy(
+            logits_coarse, y_coarse, weight=w_coarse, label_smoothing=cfg.label_smoothing
+        )
 
     if cfg.task == "vistgerd":
         return loss_fine + 0.3 * loss_coarse
@@ -440,8 +461,8 @@ def save_checkpoint(path: str, model: nn.Module, cfg: Config, mean: np.ndarray, 
     payload = {
         "model_state": model.state_dict(),
         "config": asdict(cfg),
-        "mean": mean,
-        "std": std,
+        "mean": torch.from_numpy(mean).float(),
+        "std": torch.from_numpy(std).float(),
     }
     torch.save(payload, path)
 
@@ -449,7 +470,7 @@ def save_checkpoint(path: str, model: nn.Module, cfg: Config, mean: np.ndarray, 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train habitat classification model")
     parser.add_argument("--task", choices=["vistgerd", "vistlendi", "multitask"], default=None)
-    parser.add_argument("--backbone", choices=["resnet18", "resnet34", "efficientnet_b0"], default=None)
+    parser.add_argument("--backbone", choices=["resnet18", "resnet34", "resnet50", "resnet101", "efficientnet_b0"], default=None)
     parser.add_argument("--aspect-mode", choices=["map", "scalar"], default=None)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -460,6 +481,11 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--scheduler", choices=["plateau", "cosine", "none"], default=None)
     parser.add_argument("--use-focal", action="store_true")
+    parser.add_argument("--use-balanced-sampler", action="store_true")
+    parser.add_argument("--no-class-weights", action="store_true")
+    parser.add_argument("--mixup-alpha", type=float, default=None)
+    parser.add_argument("--label-smoothing", type=float, default=None)
+    parser.add_argument("--early-stop-patience", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--coarse-to-fine", action="store_true")
     args = parser.parse_args()
@@ -489,6 +515,16 @@ def main() -> None:
         cfg.scheduler = args.scheduler
     if args.use_focal:
         cfg.use_focal = True
+    if args.use_balanced_sampler:
+        cfg.use_balanced_sampler = True
+    if args.no_class_weights:
+        cfg.use_class_weights = False
+    if args.mixup_alpha is not None:
+        cfg.mixup_alpha = args.mixup_alpha
+    if args.label_smoothing is not None:
+        cfg.label_smoothing = args.label_smoothing
+    if args.early_stop_patience is not None:
+        cfg.early_stop_patience = args.early_stop_patience
     if args.checkpoint:
         cfg.checkpoint_path = args.checkpoint
     if args.coarse_to_fine:
@@ -561,14 +597,33 @@ def main() -> None:
         seed=cfg.seed,
     )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=device.type == "cuda",
-        worker_init_fn=worker_init_fn,
-    )
+    if cfg.use_balanced_sampler:
+        class_counts = np.bincount(y_fine_train, minlength=71)
+        class_counts = np.where(class_counts == 0, 1, class_counts)
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[y_fine_train]
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights=torch.from_numpy(sample_weights).double(),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            sampler=sampler,
+            num_workers=cfg.num_workers,
+            pin_memory=device.type == "cuda",
+            worker_init_fn=worker_init_fn,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            pin_memory=device.type == "cuda",
+            worker_init_fn=worker_init_fn,
+        )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.batch_size,
@@ -610,8 +665,22 @@ def main() -> None:
             y_f = y_f.to(device, non_blocking=True)
             y_c = y_c.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            logits_f, logits_c = model(x, aspect_scalar)
-            loss = loss_for_task(logits_f, logits_c, y_f, y_c, cfg, w_fine, w_coarse)
+            if cfg.mixup_alpha > 0:
+                lam = np.random.beta(cfg.mixup_alpha, cfg.mixup_alpha)
+                perm = torch.randperm(x.size(0), device=device)
+                x_mixed = lam * x + (1.0 - lam) * x[perm]
+                aspect_mixed = lam * aspect_scalar + (1.0 - lam) * aspect_scalar[perm]
+                logits_f, logits_c = model(x_mixed, aspect_mixed)
+                loss_a = loss_for_task(
+                    logits_f, logits_c, y_f, y_c, cfg, w_fine, w_coarse
+                )
+                loss_b = loss_for_task(
+                    logits_f, logits_c, y_f[perm], y_c[perm], cfg, w_fine, w_coarse
+                )
+                loss = lam * loss_a + (1.0 - lam) * loss_b
+            else:
+                logits_f, logits_c = model(x, aspect_scalar)
+                loss = loss_for_task(logits_f, logits_c, y_f, y_c, cfg, w_fine, w_coarse)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item() * x.size(0)
@@ -654,7 +723,7 @@ def main() -> None:
             no_improve = 0
         else:
             no_improve += 1
-            if no_improve >= cfg.early_stop_patience:
+            if cfg.early_stop_patience > 0 and no_improve >= cfg.early_stop_patience:
                 print(f"early stopping at epoch {epoch + 1} (best_score={best_score:.4f})")
                 break
 
