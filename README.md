@@ -100,6 +100,35 @@ pip install -r requirements.txt
 
 Use the training data to build and train your model. Update `model.py` with your prediction logic.
 
+### 2a. Random Forest Baseline
+
+Train a RandomForestClassifier on per-band mean/std features:
+
+```bash
+python train_random_forest.py
+```
+
+Generate a submission from test patches:
+
+```bash
+python predict_random_forest.py --test-patches data/test/patches.npy --out submission.csv
+```
+
+### 2b. XGBoost (Stronger Baseline)
+
+Install dependencies (if needed) and train:
+
+```bash
+python -m pip install -r requirements.txt
+python train_xgboost.py
+```
+
+Generate a submission from test patches:
+
+```bash
+python predict_xgboost.py --test-patches data/test/patches.npy --out submission.csv
+```
+
 ### 3. Test Locally
 
 Start your API locally to test:
