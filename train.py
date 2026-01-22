@@ -28,6 +28,7 @@ class Config:
     task: str = "multitask"  # vistgerd | vistlendi | multitask
     backbone: str = "resnet18"  # resnet18 | resnet34 | efficientnet_b0
     aspect_mode: str = "map"  # map | scalar
+    device: str = "auto"  # auto | cpu | cuda
     batch_size: int = 64
     epochs: int = 25
     lr: float = 3e-4
@@ -383,6 +384,7 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     cfg: Config,
+    device: torch.device,
 ) -> Dict[str, float]:
     model.eval()
     y_true_fine = []
@@ -392,6 +394,10 @@ def evaluate(
     total_loss = 0.0
     with torch.no_grad():
         for x, aspect_scalar, y_fine, y_coarse in loader:
+            x = x.to(device, non_blocking=True)
+            aspect_scalar = aspect_scalar.to(device, non_blocking=True)
+            y_fine = y_fine.to(device, non_blocking=True)
+            y_coarse = y_coarse.to(device, non_blocking=True)
             logits_fine, logits_coarse = model(x, aspect_scalar)
             loss = loss_for_task(
                 logits_fine,
@@ -403,10 +409,10 @@ def evaluate(
                 None,
             )
             total_loss += loss.item() * x.size(0)
-            y_true_fine.append(y_fine.numpy())
-            y_true_coarse.append(y_coarse.numpy())
-            y_pred_fine.append(torch.argmax(logits_fine, dim=1).numpy())
-            y_pred_coarse.append(torch.argmax(logits_coarse, dim=1).numpy())
+            y_true_fine.append(y_fine.cpu().numpy())
+            y_true_coarse.append(y_coarse.cpu().numpy())
+            y_pred_fine.append(torch.argmax(logits_fine, dim=1).cpu().numpy())
+            y_pred_coarse.append(torch.argmax(logits_coarse, dim=1).cpu().numpy())
 
     y_true_fine = np.concatenate(y_true_fine, axis=0)
     y_pred_fine = np.concatenate(y_pred_fine, axis=0)
@@ -445,6 +451,7 @@ def main() -> None:
     parser.add_argument("--task", choices=["vistgerd", "vistlendi", "multitask"], default=None)
     parser.add_argument("--backbone", choices=["resnet18", "resnet34", "efficientnet_b0"], default=None)
     parser.add_argument("--aspect-mode", choices=["map", "scalar"], default=None)
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
@@ -464,6 +471,8 @@ def main() -> None:
         cfg.backbone = args.backbone
     if args.aspect_mode:
         cfg.aspect_mode = args.aspect_mode
+    if args.device:
+        cfg.device = args.device
     if args.batch_size is not None:
         cfg.batch_size = args.batch_size
     if args.epochs is not None:
@@ -486,6 +495,13 @@ def main() -> None:
         cfg.coarse_to_fine = True
 
     set_seed(cfg.seed)
+
+    if cfg.device == "cuda":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif cfg.device == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
         x_train, _ = load_training_data()
@@ -550,7 +566,7 @@ def main() -> None:
         batch_size=cfg.batch_size,
         shuffle=True,
         num_workers=cfg.num_workers,
-        pin_memory=False,
+        pin_memory=device.type == "cuda",
         worker_init_fn=worker_init_fn,
     )
     val_loader = DataLoader(
@@ -558,16 +574,20 @@ def main() -> None:
         batch_size=cfg.batch_size,
         shuffle=False,
         num_workers=cfg.num_workers,
-        pin_memory=False,
+        pin_memory=device.type == "cuda",
         worker_init_fn=worker_init_fn,
     )
 
     in_channels = sample_patch.shape[0]
     backbone, feat_dim = build_backbone(cfg.backbone, in_channels)
-    model = MultiHeadModel(backbone, feat_dim, cfg.aspect_mode, cfg.coarse_to_fine)
+    model = MultiHeadModel(backbone, feat_dim, cfg.aspect_mode, cfg.coarse_to_fine).to(device)
 
     w_fine = compute_class_weights(y_fine_train, 71) if cfg.use_class_weights else None
     w_coarse = compute_class_weights(y_coarse_train, 13) if cfg.use_class_weights else None
+    if w_fine is not None:
+        w_fine = w_fine.to(device)
+    if w_coarse is not None:
+        w_coarse = w_coarse.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     if cfg.scheduler == "plateau":
@@ -585,6 +605,10 @@ def main() -> None:
         model.train()
         epoch_loss = 0.0
         for x, aspect_scalar, y_f, y_c in train_loader:
+            x = x.to(device, non_blocking=True)
+            aspect_scalar = aspect_scalar.to(device, non_blocking=True)
+            y_f = y_f.to(device, non_blocking=True)
+            y_c = y_c.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             logits_f, logits_c = model(x, aspect_scalar)
             loss = loss_for_task(logits_f, logits_c, y_f, y_c, cfg, w_fine, w_coarse)
@@ -593,7 +617,7 @@ def main() -> None:
             epoch_loss += loss.item() * x.size(0)
 
         train_loss = epoch_loss / len(train_loader.dataset)
-        metrics = evaluate(model, val_loader, cfg)
+        metrics = evaluate(model, val_loader, cfg, device)
         epoch_time = time.time() - t_start
 
         if cfg.task == "vistlendi":
@@ -638,7 +662,7 @@ def main() -> None:
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    metrics = evaluate(model, val_loader, cfg)
+    metrics = evaluate(model, val_loader, cfg, device)
     if cfg.task == "vistlendi":
         final_msg = f"val_f1_weighted={metrics['f1_coarse_weighted']:.4f}"
     elif cfg.task == "multitask":
