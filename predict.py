@@ -134,6 +134,20 @@ def build_backbone(name: str, in_channels: int) -> Tuple[nn.Module, int]:
         feat_dim = model.fc.in_features
         model.fc = nn.Identity()
         return model, feat_dim
+    if name == "resnet50":
+        weights = models.ResNet50_Weights.DEFAULT
+        model = safe_load(models.resnet50, weights)
+        adapt_first_conv(model, in_channels)
+        feat_dim = model.fc.in_features
+        model.fc = nn.Identity()
+        return model, feat_dim
+    if name == "resnet101":
+        weights = models.ResNet101_Weights.DEFAULT
+        model = safe_load(models.resnet101, weights)
+        adapt_first_conv(model, in_channels)
+        feat_dim = model.fc.in_features
+        model.fc = nn.Identity()
+        return model, feat_dim
     if name == "efficientnet_b0":
         weights = models.EfficientNet_B0_Weights.DEFAULT
         model = safe_load(models.efficientnet_b0, weights)
@@ -188,8 +202,8 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     cfg = ckpt["config"]
-    mean = ckpt["mean"]
-    std = ckpt["std"]
+    mean = ckpt["mean"].cpu().numpy()
+    std = ckpt["std"].cpu().numpy()
 
     aspect_mode = cfg.get("aspect_mode", "map")
     backbone_name = cfg.get("backbone", "resnet18")
