@@ -23,13 +23,3 @@ Train five seeded Random Forest models:
 ```bash
 python train_random_forest.py
 ```
-
-Generate a submission from a trained model:
-
-```bash
-python predict_random_forest.py --test-patches data/test/patches.npy --model checkpoints/random_forest_seed0.joblib --out submission.csv
-```
-
-## Notes
-
-This is intentionally a strong baseline. I may revisit validation strategies or ensembles later if needed.
