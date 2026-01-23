@@ -1,14 +1,14 @@
 # Icelandic Habitat Classification
 
-Short project note for this repository.
+Short project note for this repository. This is the solution for problem 2, by the team Fórnarlömb Basiliskunnar. 
 
 ## What this is
 
 The task is to classify Icelandic habitat types (*vistgerðir*) from small satellite image patches. Each sample is a 15×35×35 array (Sentinel‑2 spectral bands + terrain features), and the label is one of 71 habitat classes.
 
-## What I’m doing
+## What we're doing
 
-I’m keeping the approach simple and reproducible:
+We're keeping the approach simple and reproducible:
 
 - Extract per‑band summary features from each patch (mean, std, min, max, median, and percentiles + normalized band differences).
 - Train tree‑based models with fixed random seeds.
