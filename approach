@@ -1,0 +1,22 @@
+# Approach
+
+This file explains what I am doing in this project and what has worked best so far.
+
+## Best Result So Far
+
+My best result comes from a simple **Random Forest** model with fixed **random seeds** for reproducibility, trained on **all available labeled data** (train + validation). I did not keep a separate validation split. Since the competition allows only a single test submission, I prioritized maximizing training data over local validation.
+
+In short:
+- Feature extraction: basic statistics per band (mean/std) from each 15-channel patch.
+- Model: RandomForestClassifier with fixed seeds.
+- Data usage: all labeled data combined; no separate validation split.
+
+## Why This
+
+- Random Forests are strong, stable baselines for tabular features.
+- Fixed seeds make results repeatable.
+- Using all labeled data should help when the final evaluation is only once.
+
+## Notes
+
+This is a baseline and not necessarily optimal. I may revisit validation strategies if I need better local feedback before the final submission.

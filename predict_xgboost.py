@@ -7,9 +7,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import json
 import numpy as np
 import pandas as pd
-from xgboost import XGBClassifier
+from xgboost import Booster, DMatrix
 
 from utils import extract_features_batch_extended
 
@@ -27,15 +28,27 @@ def main() -> None:
     classes_path = model_path.with_suffix(".classes.npy")
     if not classes_path.exists():
         raise FileNotFoundError(f"classes not found at {classes_path}")
+    meta_path = model_path.with_suffix(".meta.json")
 
     patches = np.load(args.test_patches)
     features = extract_features_batch_extended(patches)
 
-    model = XGBClassifier()
-    model.load_model(str(model_path))
     classes = np.load(classes_path)
-    preds_enc = model.predict(features)
-    preds = classes[preds_enc.astype(int)]
+    best_iteration = None
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        if meta.get("best_iteration", -1) >= 0:
+            best_iteration = int(meta["best_iteration"])
+
+    booster = Booster()
+    booster.load_model(str(model_path))
+    dmat = DMatrix(features)
+    if best_iteration is None:
+        proba = booster.predict(dmat)
+    else:
+        proba = booster.predict(dmat, iteration_range=(0, best_iteration + 1))
+
+    preds = classes[np.argmax(proba, axis=1).astype(int)]
 
     df = pd.DataFrame({"id": np.arange(len(preds)), "label": preds})
     df.to_csv(args.out, index=False)
